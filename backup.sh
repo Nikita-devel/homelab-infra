@@ -37,6 +37,7 @@ fi
 
 restic backup \
   /mnt/usb512/nextcloud/data \
+  /mnt/usb512/nextcloud/app/config/config.php \
   /root/nextcloud-db.sql \
   /root/finance-tracker.db \
   /mnt/usb512/homepage/config \

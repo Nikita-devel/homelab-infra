@@ -48,7 +48,9 @@ Host-specific values to check on a new machine:
 
 1. Clone this repo to `/root/homelab-infra`.
 2. In each service directory: `cp .env.example .env`, fill in the values (see Configuration), then `docker compose up -d`.
-3. Finance Tracker needs its application source in `finance-tracker/` (see Known gaps). Keep `FT_SEED: "0"` in its compose file. Seeding is only for an empty database.
+3. Finance Tracker: clone its source to `/opt/finance-tracker`. The compose file there matches `finance-tracker/docker-compose.yml` in this repo.
+   `git clone git@github.com:Nikita-devel/finance-tracker.git /opt/finance-tracker`
+   Create `.env` from `.env.example` and keep `FT_SEED: "0"`. Seeding is only for an empty database.
 4. Publish the services over Tailscale. Check the syntax against `tailscale serve --help` for your version.
 
 ```
@@ -80,7 +82,7 @@ Keep these in a password manager. The repo cannot recreate them.
 
 1. Puts Nextcloud into maintenance mode and dumps its MariaDB database.
 2. Takes a consistent SQLite snapshot of Finance Tracker with `.backup` and checks it with `PRAGMA integrity_check`.
-3. Backs up to Backblaze B2 with restic: Nextcloud data, the database dump, the Finance Tracker snapshot, Homepage config and Pi-hole config.
+3. Backs up to Backblaze B2 with restic: Nextcloud data, Nextcloud `config.php`, the database dump, the Finance Tracker snapshot, Homepage config and Pi-hole config.
 4. Applies retention (7 daily, 4 weekly, 6 monthly) and prunes.
 5. Pings a healthcheck. A missing ping means the backup did not complete.
 
@@ -102,6 +104,10 @@ systemctl start restic-backup.service
 journalctl -u restic-backup.service -n 50 --no-pager
 ```
 
+## Related repositories
+
+- `Nikita-devel/finance-tracker`: Finance Tracker source (Next.js, Prisma, SQLite). Contains no database, no `.env` and no personal data.
+
 ## Restore from scratch
 
 Restic stores absolute paths, so restore into a staging directory first and copy from there.
@@ -112,7 +118,7 @@ Restic stores absolute paths, so restore into a staging directory first and copy
    Files appear under `/root/restore/mnt/usb512/...` and `/root/restore/root/...`.
 3. Nextcloud: copy `/root/restore/mnt/usb512/nextcloud/data` into `/mnt/usb512/nextcloud/data`. Start only the database with `cd nextcloud && docker compose up -d db`, then import the dump:
    `docker exec -i nextcloud-db-1 sh -c 'mysql -unextcloud -p"$MYSQL_PASSWORD" nextcloud' < /root/restore/root/nextcloud-db.sql`
-   Nextcloud also needs `config/config.php`, which is not in the backup yet. See Known gaps.
+   Copy `/root/restore/mnt/usb512/nextcloud/app/config/config.php` to `/mnt/usb512/nextcloud/app/config/config.php`. Nextcloud does not start without it.
 4. Finance Tracker: with its container stopped, copy the snapshot into place:
    `cp /root/restore/root/finance-tracker.db /mnt/usb512/finance-tracker/data/finance.db`
    Then `sqlite3 /mnt/usb512/finance-tracker/data/finance.db "PRAGMA integrity_check;"` must print `ok`.
@@ -123,8 +129,6 @@ Restore has been tested on a sample of files. A full restore has not been tested
 
 ## Known gaps
 
-- **Nextcloud `config/config.php` is not backed up.** It holds `instanceid`, `secret` and `passwordsalt`. Without it, the restored Nextcloud data does not work. Fix: add `/mnt/usb512/nextcloud/app/config/config.php` to the paths in `backup.sh`.
-- **The Finance Tracker application source is not in this repo.** Its compose file uses `build: .` and expects the source in `finance-tracker/`.
 - Pi-hole and Homepage use `:latest` tags. Pin versions for reproducible rebuilds.
 - Tailscale serve mappings are set by hand (see Setup).
 - Single node, no high availability.
