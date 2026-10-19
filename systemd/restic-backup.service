@@ -1,0 +1,9 @@
+[Unit]
+Description=Restic backup to Backblaze B2
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+ExecStart=/root/backup.sh

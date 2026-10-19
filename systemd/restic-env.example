@@ -1,0 +1,7 @@
+# Copy to /root/.restic-env and run: chmod 600 /root/.restic-env
+# Never commit the real file (.gitignore covers *.restic-env).
+export B2_ACCOUNT_ID=
+export B2_ACCOUNT_KEY=
+export RESTIC_REPOSITORY=b2:<bucket-name>:<path>
+export RESTIC_PASSWORD=
+HC_PING_URL=https://hc-ping.com/<uuid>

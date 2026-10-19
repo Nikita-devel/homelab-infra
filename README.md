@@ -1,67 +1,131 @@
 # homelab-infra
 
-Infrastructure-as-code for a single-node home server running Debian 13 and Docker Compose.
-Hardware: a used 15-inch laptop, internal NVMe for the OS, external USB SSD for service data.
+Infrastructure-as-code for a single-node home server: Debian 13, Docker Compose, Tailscale for remote access, restic to Backblaze B2 for backups.
+
+This repo holds the Compose files, the backup script and the systemd units. It does not hold secrets, databases or user data. A fresh install from this repo gives the same services and configuration, but not the same data. See [Restore from scratch](#restore-from-scratch) and [Known gaps](#known-gaps).
 
 ## Services
 
-| Service | Purpose | Compose directory |
-|---|---|---|
-| Nextcloud (+ MariaDB 10.6) | File sync and photo archive | `nextcloud/` |
-| Finance Tracker | Shared expense tracking (SQLite) | `finance-tracker/` |
-| Pi-hole | LAN DNS ad-blocking | `pihole/` |
-| Homepage | Service dashboard | `homepage/` |
-| Weather | Static nginx page | `weather/` |
+| Service | LAN port | Tailnet URL (port) | Compose dir | Image |
+|---|---|---|---|---|
+| Nextcloud + MariaDB 10.6 | 8080 | `https://<host>.<tailnet>.ts.net` (443) | `nextcloud/` | `nextcloud`, `mariadb:10.6` |
+| Pi-hole (DNS 53, web 8081) | 53, 8081 | `:10443` | `pihole/` | `pihole/pihole:latest` |
+| Homepage | 3000 | `:8443` | `homepage/` | `ghcr.io/gethomepage/homepage:latest` |
+| Weather (static nginx page) | 8082 | `:9443` | `weather/` | `nginx:alpine` |
+| Finance Tracker (SQLite) | 8083 | `:11443` | `finance-tracker/` | built locally as `finance-tracker:local` |
 
-Remote access is provided by Tailscale. No ports are open on the router.
-Selected services are published with `tailscale serve` (HTTPS, tailnet-only).
+No ports are open on the router. Services are reachable only through Tailscale.
 
-## Layout
+## Host prerequisites
 
-Service data lives on the external SSD mounted at `/mnt/usb512`:
+Tested on: Debian 13.6, kernel 6.12, Docker Engine 26.1.5, Compose plugin 2.26.1, git 2.47.3, restic 0.18.0, sqlite3 3.46.1.
 
-- `/mnt/usb512/nextcloud/{app,data,db}`
-- `/mnt/usb512/finance-tracker/data/finance.db`
-- `/mnt/usb512/pihole/`, `/mnt/usb512/homepage/config/`, `/mnt/usb512/weather/`
+- Docker Engine and the Compose plugin
+- Tailscale, logged in to your tailnet
+- restic, sqlite3, curl, git
+- External SSD formatted as ext4. SQLite needs a POSIX filesystem. On exFAT or NTFS, journal deletes fail with `SQLITE_IOERR_DELETE`.
 
-Data and secrets are not stored in this repository.
+Mount the SSD at `/mnt/usb512`. Find its UUID with `blkid`, then add this line to `/etc/fstab`:
+
+```
+UUID=<ssd-uuid>  /mnt/usb512  ext4  defaults,nofail  0  2
+```
+
+Create the data directories:
+
+```
+mkdir -p /mnt/usb512/nextcloud/{app,data,db} \
+         /mnt/usb512/finance-tracker/data \
+         /mnt/usb512/pihole /mnt/usb512/homepage/config /mnt/usb512/weather
+```
+
+Host-specific values to check on a new machine:
+
+- `backup.sh` skips the backup when the server runs over Wi-Fi. It checks for the interface `wlp2s0`, which is the NIC of this machine. Set yours: `ip route get 8.8.8.8`.
+- `homepage/docker-compose.yml` has `group_add: "988"`, the GID of the `docker` group here. Check yours with `getent group docker`.
+
+## Setup
+
+1. Clone this repo to `/root/homelab-infra`.
+2. In each service directory: `cp .env.example .env`, fill in the values (see Configuration), then `docker compose up -d`.
+3. Finance Tracker needs its application source in `finance-tracker/` (see Known gaps). Keep `FT_SEED: "0"` in its compose file. Seeding is only for an empty database.
+4. Publish the services over Tailscale. Check the syntax against `tailscale serve --help` for your version.
+
+```
+tailscale serve --bg --https=443   http://127.0.0.1:8080
+tailscale serve --bg --https=10443 http://127.0.0.1:8081
+tailscale serve --bg --https=8443  http://127.0.0.1:3000
+tailscale serve --bg --https=9443  http://127.0.0.1:8082
+tailscale serve --bg --https=11443 http://127.0.0.1:8083
+```
+
+5. Backups: see [Backups](#backups).
 
 ## Configuration
 
-Each service has a `.env.example` with placeholder values.
-Create a real `.env` next to each `docker-compose.yml` and never commit it (`.gitignore` covers `.env`).
+Each service has an `.env.example` with placeholder values. Copy it to `.env` in the same directory as its `docker-compose.yml`. `.env` files are never committed (see `.gitignore`).
 
-Values that are not in this repo and must be provided at deploy time:
+Values that are not in this repo:
 
 - Tailscale hostname and IP
 - LAN address of the host
 - Database and admin passwords
-- Restic repository credentials and healthcheck URL (in `/root/.restic-env`, mode 600)
+- Restic credentials and the healthcheck URL, in `/root/.restic-env` (mode 600). Template: `systemd/restic-env.example`
+
+Keep these in a password manager. The repo cannot recreate them.
 
 ## Backups
 
-`backup.sh` runs daily from a systemd timer (`restic-backup.timer`, 03:30 with randomized delay).
+`backup.sh` runs from a systemd timer (`restic-backup.timer`, 03:30, with up to 15 minutes of random delay).
 
 1. Puts Nextcloud into maintenance mode and dumps its MariaDB database.
-2. Takes a consistent SQLite snapshot of Finance Tracker with `.backup`.
-3. Backs up data, dumps, and selected configs to Backblaze B2 with restic.
+2. Takes a consistent SQLite snapshot of Finance Tracker with `.backup` and checks it with `PRAGMA integrity_check`.
+3. Backs up to Backblaze B2 with restic: Nextcloud data, the database dump, the Finance Tracker snapshot, Homepage config and Pi-hole config.
 4. Applies retention (7 daily, 4 weekly, 6 monthly) and prunes.
 5. Pings a healthcheck. A missing ping means the backup did not complete.
 
-The script refuses to run over a mobile hotspot interface and always disables maintenance mode on exit.
+The script always turns maintenance mode off on exit and deletes its temporary dumps.
 
-## Restore order (from scratch)
+Install:
 
-1. Install Debian and Docker Engine, then Tailscale.
-2. Restore `/mnt/usb512` contents from restic (`restic restore latest --target /`).
-3. Recreate `.env` files from the `.env.example` templates.
-4. Start services with `docker compose up -d` in each service directory.
-5. Verify Nextcloud with `occ status` and Finance Tracker with `PRAGMA integrity_check`.
+```
+install -m 700 /root/homelab-infra/backup.sh /root/backup.sh
+cp /root/homelab-infra/systemd/restic-backup.service /root/homelab-infra/systemd/restic-backup.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now restic-backup.timer
+```
 
-Restore has been tested on a sample of files. Full restore has not yet been tested end to end.
+Run it once by hand and read the log:
 
-## Known limitations
+```
+systemctl start restic-backup.service
+journalctl -u restic-backup.service -n 50 --no-pager
+```
 
-- The Finance Tracker application source is in a separate repository. Its compose file expects a `build:` context from that source.
-- Single-node setup, no high availability.
-- The external SSD connection has been unstable in the past; data is planned to move to the internal NVMe.
+## Restore from scratch
+
+Restic stores absolute paths, so restore into a staging directory first and copy from there.
+
+1. Install the host prerequisites and mount the SSD.
+2. Restore the latest snapshot into staging:
+   `restic restore latest --target /root/restore`
+   Files appear under `/root/restore/mnt/usb512/...` and `/root/restore/root/...`.
+3. Nextcloud: copy `/root/restore/mnt/usb512/nextcloud/data` into `/mnt/usb512/nextcloud/data`. Start only the database with `cd nextcloud && docker compose up -d db`, then import the dump:
+   `docker exec -i nextcloud-db-1 sh -c 'mysql -unextcloud -p"$MYSQL_PASSWORD" nextcloud' < /root/restore/root/nextcloud-db.sql`
+   Nextcloud also needs `config/config.php`, which is not in the backup yet. See Known gaps.
+4. Finance Tracker: with its container stopped, copy the snapshot into place:
+   `cp /root/restore/root/finance-tracker.db /mnt/usb512/finance-tracker/data/finance.db`
+   Then `sqlite3 /mnt/usb512/finance-tracker/data/finance.db "PRAGMA integrity_check;"` must print `ok`.
+5. Copy the Pi-hole and Homepage config from `/root/restore/mnt/usb512/` into `/mnt/usb512/`.
+6. Start every service: `docker compose up -d` in each service directory. Check Nextcloud with `docker exec -u www-data nextcloud-app-1 php occ status` and Finance Tracker with `curl http://127.0.0.1:8083/api/health`.
+
+Restore has been tested on a sample of files. A full restore has not been tested end to end.
+
+## Known gaps
+
+- **Nextcloud `config/config.php` is not backed up.** It holds `instanceid`, `secret` and `passwordsalt`. Without it, the restored Nextcloud data does not work. Fix: add `/mnt/usb512/nextcloud/app/config/config.php` to the paths in `backup.sh`.
+- **The Finance Tracker application source is not in this repo.** Its compose file uses `build: .` and expects the source in `finance-tracker/`.
+- Pi-hole and Homepage use `:latest` tags. Pin versions for reproducible rebuilds.
+- Tailscale serve mappings are set by hand (see Setup).
+- Single node, no high availability.
+- The external SSD has been unstable in the past. The plan is to move data to the internal NVMe.
