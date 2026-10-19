@@ -1,0 +1,8 @@
+.env
+*.env
+*.restic-env
+*.db
+*.sql
+config/
+etc-pihole/
+config.php

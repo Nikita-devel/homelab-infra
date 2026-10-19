@@ -1,0 +1,25 @@
+services:
+  finance-tracker:
+    build: .
+    image: finance-tracker:local
+    container_name: finance-tracker
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "${DATABASE_URL}"
+      TZ: "Europe/Paris"
+      # Mettre à 1 UNIQUEMENT pour amorcer une base vide (2 users + catégories).
+      FT_SEED: "0"
+    volumes:
+      # Doit être un système de fichiers POSIX (ext4). SQLite supprime son
+      # journal à chaque commit : sur exFAT/NTFS -> SQLITE_IOERR_DELETE.
+      - /mnt/usb512/finance-tracker/data:/data
+    ports:
+      # Accessible sur le LAN, comme pihole/homepage/weather.
+      # Pour du tailnet-only, remplacer par "127.0.0.1:8083:3010"
+      # et pointer le siteMonitor de Homepage vers le réseau docker.
+      - "8083:3010"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
